@@ -1,0 +1,855 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FormFlow Builder (Manual Mode)</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Font Awesome -->
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    
+    <!-- React & ReactDOM (UMD) -->
+    <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+    
+    <!-- Babel (for JSX) -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js" crossorigin></script>
+
+    <!-- Tailwind Config -->
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              primary: '#4f46e5',
+              secondary: '#64748b',
+              accent: '#0ea5e9',
+            }
+          }
+        }
+      }
+    </script>
+
+    <style>
+        /* Custom Scrollbar */
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: #1e1e1e;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: #4b5563;
+            border-radius: 4px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+            background: #6b7280;
+        }
+        
+        /* Animation */
+        @keyframes slideInRight {
+            from { transform: translateX(100%); }
+            to { transform: translateX(0); }
+        }
+        .animate-slide-in-right {
+            animation: slideInRight 0.3s ease-out;
+        }
+    </style>
+</head>
+<body class="bg-gray-50 h-screen overflow-hidden text-slate-800">
+    <div id="root" class="h-full"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // --- CONSTANTS & TYPES ---
+
+        const ELEMENT_GROUPS = {
+            Layout: ['layout_row', 'layout_2col', 'layout_3col'],
+            Typography: ['header', 'paragraph'],
+            'Basic Fields': ['text', 'email', 'password', 'number', 'textarea'],
+            'Choice & Selection': ['select', 'checkbox', 'multi_checkbox', 'radio'],
+            'Advanced': ['date', 'file', 'button']
+        };
+
+        const DEFAULT_PROPS = {
+            layout_row: { label: 'Container', columns: [[]] },
+            layout_2col: { label: 'Two Columns', columns: [[], []] },
+            layout_3col: { label: 'Three Columns', columns: [[], [], []] },
+            header: { label: 'Header Text', placeholder: 'Form Title' },
+            paragraph: { label: 'Paragraph', placeholder: 'Enter description text here...' },
+            text: { label: 'Text Input', placeholder: 'Enter text...', required: false },
+            email: { label: 'Email Address', placeholder: 'user@example.com', required: true },
+            password: { label: 'Password', placeholder: '******', required: true },
+            number: { label: 'Number', placeholder: '0', required: false },
+            textarea: { label: 'Text Area', placeholder: 'Enter long text...', required: false },
+            select: { label: 'Dropdown', options: ['Option 1', 'Option 2', 'Option 3'], required: false },
+            checkbox: { label: 'Single Checkbox', options: ['I agree'], required: false },
+            multi_checkbox: { label: 'Multiple Checkboxes', options: ['Option 1', 'Option 2', 'Option 3'], required: false },
+            radio: { label: 'Radio Group', options: ['Yes', 'No'], required: false },
+            date: { label: 'Date Picker', required: false },
+            file: { label: 'File Upload', required: false, folderId: '' },
+            button: { label: 'Submit Button', placeholder: 'Submit' }
+        };
+
+        const GS_CODE_TEMPLATE = `// ---------------------------------------------------------
+// GOOGLE APPS SCRIPT CODE
+// Copy this content into your Google Apps Script project as 'Code.gs'
+// ---------------------------------------------------------
+
+function doGet(e) {
+  return HtmlService.createHtmlOutputFromFile('index')
+      .setTitle('My FormFlow App')
+      .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL)
+      .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+}
+
+function processForm(formObject) {
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sheet = ss.getSheetByName("Form Responses");
+    if (!sheet) {
+      sheet = ss.insertSheet("Form Responses");
+      sheet.appendRow(["Timestamp"]);
+    }
+    
+    var dataRow = {};
+    var headers = sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), 1)).getValues()[0];
+    
+    var keys = Object.keys(formObject).filter(function(k) { 
+        return k !== 'parameter' && k !== 'contextPath' && k !== 'contentLength' && !k.startsWith('folderId_'); 
+    });
+
+    keys.forEach(function(key) {
+      if (headers.indexOf(key) === -1) {
+        headers.push(key);
+        sheet.getRange(1, headers.length).setValue(key);
+      }
+    });
+
+    keys.forEach(function(key) {
+      var value = formObject[key];
+      if (value && typeof value.getContentType === 'function') {
+        var folderId = formObject["folderId_" + key];
+        var folder = folderId ? DriveApp.getFolderById(folderId) : DriveApp.getRootFolder();
+        var fileUrl = folder.createFile(value).getUrl();
+        dataRow[key] = fileUrl;
+      } else if (Array.isArray(value)) {
+        dataRow[key] = value.join(', ');
+      } else {
+        dataRow[key] = value;
+      }
+    });
+
+    var newRowArray = headers.map(function(header) {
+      if (header === 'Timestamp') return new Date();
+      return dataRow[header] || "";
+    });
+    
+    sheet.appendRow(newRowArray);
+    return { success: true };
+  } catch (e) {
+    Logger.log(e);
+    throw new Error(e.toString());
+  }
+}`;
+
+        // --- SERVICES ---
+
+        const generateHTML = (elements) => {
+            const generateElementHTML = (el) => {
+                const requiredAttr = el.required ? 'required' : '';
+                const nameAttr = el.label ? `name="${el.label.replace(/\s+/g, '_').toLowerCase()}"` : '';
+                
+                // Helper for inputs
+                const renderInput = (type) => `
+                    <div class="mb-4">
+                        <label class="block text-gray-700 text-sm font-bold mb-2">${el.label}</label>
+                        <input type="${type}" ${nameAttr} placeholder="${el.placeholder || ''}" ${requiredAttr} class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline">
+                        ${el.helpText ? `<p class="text-gray-500 text-xs italic mt-1">${el.helpText}</p>` : ''}
+                    </div>`;
+
+                switch (el.type) {
+                    case 'header': return `<h2 class="text-2xl font-bold mb-4 text-gray-800">${el.label}</h2>`;
+                    case 'paragraph': return `<p class="mb-4 text-gray-600">${el.placeholder}</p>`;
+                    case 'text': return renderInput('text');
+                    case 'email': return renderInput('email');
+                    case 'password': return renderInput('password');
+                    case 'number': return renderInput('number');
+                    case 'date': return renderInput('date');
+                    case 'textarea': return `
+                        <div class="mb-4">
+                            <label class="block text-gray-700 text-sm font-bold mb-2">${el.label}</label>
+                            <textarea ${nameAttr} placeholder="${el.placeholder || ''}" ${requiredAttr} class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline h-24"></textarea>
+                        </div>`;
+                    case 'select': return `
+                        <div class="mb-4">
+                            <label class="block text-gray-700 text-sm font-bold mb-2">${el.label}</label>
+                            <div class="relative">
+                                <select ${nameAttr} ${requiredAttr} class="block appearance-none w-full bg-white border border-gray-400 hover:border-gray-500 px-4 py-2 pr-8 rounded shadow leading-tight focus:outline-none focus:shadow-outline">
+                                    ${(el.options || []).map(opt => `<option value="${opt}">${opt}</option>`).join('')}
+                                </select>
+                            </div>
+                        </div>`;
+                    case 'checkbox': return `
+                        <div class="mb-4">
+                            <label class="inline-flex items-center">
+                                <input type="checkbox" ${nameAttr} class="form-checkbox h-5 w-5 text-indigo-600" ${requiredAttr}>
+                                <span class="ml-2 text-gray-700">${el.label}</span>
+                            </label>
+                        </div>`;
+                    case 'multi_checkbox': return `
+                        <div class="mb-4">
+                            <label class="block text-gray-700 text-sm font-bold mb-2">${el.label}</label>
+                            <div class="flex flex-col gap-2">
+                                ${(el.options || []).map(opt => `
+                                    <label class="inline-flex items-center">
+                                        <input type="checkbox" name="${el.label.replace(/\s+/g, '_').toLowerCase()}_${opt}" value="${opt}" class="form-checkbox text-indigo-600">
+                                        <span class="ml-2 text-gray-700">${opt}</span>
+                                    </label>
+                                `).join('')}
+                            </div>
+                        </div>`;
+                    case 'radio': return `
+                        <div class="mb-4">
+                            <label class="block text-gray-700 text-sm font-bold mb-2">${el.label}</label>
+                            <div class="flex flex-col gap-2">
+                                ${(el.options || []).map(opt => `
+                                    <label class="inline-flex items-center">
+                                        <input type="radio" ${nameAttr} value="${opt}" class="form-radio text-indigo-600" ${requiredAttr}>
+                                        <span class="ml-2 text-gray-700">${opt}</span>
+                                    </label>
+                                `).join('')}
+                            </div>
+                        </div>`;
+                    case 'file': return `
+                        <div class="mb-4">
+                            <label class="block text-gray-700 text-sm font-bold mb-2">${el.label}</label>
+                            <input type="file" ${nameAttr} ${requiredAttr} class="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100">
+                            ${el.folderId ? `<input type="hidden" name="folderId_${el.label.replace(/\s+/g, '_').toLowerCase()}" value="${el.folderId}">` : ''}
+                        </div>`;
+                    case 'button': return `
+                        <div class="flex items-center justify-between mt-6">
+                            <button type="submit" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline w-full transition-colors">
+                                ${el.placeholder}
+                            </button>
+                        </div>`;
+                    
+                    // Layouts
+                    case 'layout_row':
+                    case 'layout_2col': 
+                    case 'layout_3col':
+                        const cols = el.columns || [];
+                        const gridClass = cols.length === 2 ? 'grid-cols-1 md:grid-cols-2' : cols.length === 3 ? 'grid-cols-1 md:grid-cols-3' : 'grid-cols-1';
+                        return `
+                        <div class="grid ${gridClass} gap-4 mb-4">
+                            ${cols.map(colElements => `
+                                <div class="p-2">
+                                    ${colElements.map(child => generateElementHTML(child)).join('')}
+                                </div>
+                            `).join('')}
+                        </div>`;
+
+                    default: return '';
+                }
+            };
+
+            const formContent = elements.map(generateElementHTML).join('\n');
+            
+            return `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Generated Form</title>
+    <script src="https://cdn.tailwindcss.com"><\/script>
+    <script>
+      function handleSubmit(event) {
+        event.preventDefault();
+        const form = event.target;
+        const formData = new FormData(form);
+        const data = {};
+        formData.forEach((value, key) => data[key] = value);
+        
+        // Google Apps Script integration
+        if (typeof google !== 'undefined' && google.script) {
+           google.script.run
+             .withSuccessHandler(() => {
+                 form.reset();
+                 alert('Form submitted successfully!');
+             })
+             .withFailureHandler((err) => alert('Error: ' + err))
+             .processForm(form);
+        } else {
+           console.log('Form Data:', data);
+           alert('Form submitted! Check console for data.');
+        }
+      }
+    <\/script>
+</head>
+<body class="bg-gray-100 min-h-screen py-10 px-4">
+    <div class="max-w-3xl mx-auto bg-white rounded-lg shadow-xl overflow-hidden">
+        <form onsubmit="handleSubmit(event)" class="p-8">
+            ${formContent}
+        </form>
+    </div>
+</body>
+</html>`;
+        };
+
+        // --- COMPONENTS ---
+
+        // 1. SIDEBAR
+        const getIcon = (type) => {
+            const icons = {
+                layout_row: 'fa-table-cells-row-lock',
+                layout_2col: 'fa-table-columns',
+                layout_3col: 'fa-table',
+                header: 'fa-heading',
+                paragraph: 'fa-paragraph',
+                text: 'fa-font',
+                email: 'fa-envelope',
+                password: 'fa-key',
+                number: 'fa-hashtag',
+                textarea: 'fa-align-left',
+                select: 'fa-list',
+                checkbox: 'fa-square-check',
+                multi_checkbox: 'fa-list-check',
+                radio: 'fa-circle-dot',
+                date: 'fa-calendar',
+                file: 'fa-upload',
+                button: 'fa-computer-mouse'
+            };
+            return icons[type] || 'fa-cube';
+        };
+
+        const getLabel = (type) => {
+            if (type.startsWith('layout_')) return type.replace('layout_', '').replace('2col', '2 Columns').replace('3col', '3 Columns').replace('row', 'Container');
+            if (type === 'multi_checkbox') return 'Multiple Checkboxes';
+            return type.charAt(0).toUpperCase() + type.slice(1);
+        }
+
+        const Sidebar = ({ onDragStart }) => (
+            <div className="w-72 bg-white border-r border-slate-200 flex flex-col h-full text-slate-600 shadow-sm z-10">
+                <div className="p-5 border-b border-slate-100">
+                    <div className="flex items-center gap-3 text-slate-800">
+                        <div className="w-8 h-8 rounded bg-[#06C755] flex items-center justify-center shadow-sm">
+                            <i className="fa-solid fa-shapes text-white"></i>
+                        </div>
+                        <h1 className="font-bold text-lg tracking-tight">Form Builder</h1>
+                    </div>
+                    <p className="text-xs text-slate-400 mt-1 pl-11">Drag elements to Code</p>
+                </div>
+                
+                <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
+                    {Object.entries(ELEMENT_GROUPS).map(([group, types]) => (
+                        <div key={group} className="mb-6">
+                            <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 px-1">{group}</h3>
+                            <div className="grid grid-cols-2 gap-2">
+                                {types.map((type) => (
+                                    <div
+                                        key={type}
+                                        draggable
+                                        onDragStart={(e) => onDragStart(e, type)}
+                                        className="flex flex-col items-center justify-center p-3 bg-white rounded-lg border border-slate-200 hover:border-[#06C755] hover:bg-slate-50 cursor-grab active:cursor-grabbing transition-all hover:shadow-sm group"
+                                    >
+                                        <i className={`fa-solid ${getIcon(type)} text-xl mb-2 text-slate-400 group-hover:text-[#06C755] transition-colors`}></i>
+                                        <span className="text-xs font-medium text-center text-slate-600 group-hover:text-slate-800">{getLabel(type)}</span>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    ))}
+                </div>
+                <div className="p-4 border-t border-slate-100 bg-slate-50">
+                    <div className="text-xs text-center text-slate-400">
+                        v1.0.1 &bull; Light Theme
+                    </div>
+                </div>
+            </div>
+        );
+
+        // 2. CANVAS
+        const Canvas = ({ elements, selectedId, onSelect, onDrop, onDragOver, onMoveUp, onMoveDown }) => {
+            const inputClass = "w-full border-slate-300 rounded-lg focus:ring-[#06C755] focus:border-[#06C755] py-2 px-3 bg-white outline-none border transition-all shadow-sm text-slate-600 placeholder:text-slate-400 pointer-events-none";
+            const labelClass = "mb-1.5 block text-sm font-medium text-slate-700 pointer-events-none";
+            
+            const renderElementContent = (el) => {
+                // RECURSIVE LAYOUT RENDERING
+                if (el.type === 'layout_row' || el.type === 'layout_2col' || el.type === 'layout_3col') {
+                    const colCount = el.type === 'layout_3col' ? 3 : (el.type === 'layout_2col' ? 2 : 1);
+                    const gridClass = el.type === 'layout_3col' ? 'grid-cols-1 md:grid-cols-3' : (el.type === 'layout_2col' ? 'grid-cols-1 md:grid-cols-2' : 'grid-cols-1');
+                    
+                    return (
+                        <div className={`grid ${gridClass} gap-4`}>
+                        {Array.from({ length: colCount }).map((_, colIndex) => (
+                            <div 
+                                key={colIndex}
+                                onDrop={(e) => { e.preventDefault(); e.stopPropagation(); onDrop(e, el.id, colIndex); }}
+                                onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add('bg-slate-100'); }}
+                                onDragLeave={(e) => { e.currentTarget.classList.remove('bg-slate-100'); }}
+                                className={`min-h-[100px] rounded border-2 border-dashed border-slate-200 bg-slate-50/50 p-2 transition-colors hover:bg-slate-50 hover:border-slate-300 ${el.columns?.[colIndex]?.length === 0 ? 'flex items-center justify-center' : ''}`}
+                            >
+                                {el.columns?.[colIndex]?.length === 0 ? (
+                                    <span className="text-xs text-slate-400 font-medium pointer-events-none">Drop Content Here</span>
+                                ) : (
+                                    renderList(el.columns?.[colIndex] || [])
+                                )}
+                            </div>
+                        ))}
+                        </div>
+                    );
+                }
+
+                switch (el.type) {
+                    case 'header':
+                        return <h2 className="text-2xl font-bold text-slate-800 border-b border-slate-200 pb-2">{el.label}</h2>;
+                    case 'paragraph':
+                        return <p className="text-slate-600 leading-relaxed">{el.placeholder || el.label}</p>;
+                    case 'textarea':
+                        return <div className={`${inputClass} h-24`}></div>;
+                    case 'select':
+                        return (
+                            <div className={`${inputClass} flex justify-between items-center`}>
+                                <span>{el.placeholder || 'Select option...'}</span>
+                                <i className="fa-solid fa-chevron-down text-xs text-slate-400"></i>
+                            </div>
+                        );
+                    case 'checkbox':
+                    case 'multi_checkbox':
+                    case 'radio':
+                        return (
+                            <div className="space-y-2 pt-1">
+                                {(el.options || ['Option 1']).map((opt, i) => (
+                                    <div key={i} className="flex items-center gap-2.5">
+                                        <div className={`w-4 h-4 border border-slate-300 ${el.type === 'radio' ? 'rounded-full' : 'rounded'} bg-white flex items-center justify-center`}>
+                                        </div>
+                                        <span className="text-sm text-slate-700">{opt}</span>
+                                    </div>
+                                ))}
+                            </div>
+                        )
+                    case 'button':
+                        return <button className="w-full bg-[#06C755] text-white rounded-lg py-2.5 text-sm font-semibold shadow-md">{el.placeholder || el.label}</button>;
+                    case 'file':
+                        return <div className={`${inputClass} border-dashed flex items-center text-slate-400 bg-slate-50`}><i className="fa-solid fa-cloud-arrow-up mr-2 text-[#06C755]"></i> Choose File</div>;
+                    case 'date':
+                        return <div className={`${inputClass} flex justify-between items-center text-slate-400`}><span>mm/dd/yyyy</span><i className="fa-regular fa-calendar text-slate-400"></i></div>;
+                    default:
+                        return <div className={inputClass}></div>;
+                }
+            };
+
+            const renderList = (list) => {
+                return list.map((el, index) => (
+                    <div
+                        key={el.id}
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            onSelect(el.id);
+                        }}
+                        className={`group relative rounded-lg p-4 transition-all cursor-pointer bg-white border mb-4
+                            ${selectedId === el.id 
+                            ? 'border-[#06C755] ring-2 ring-[#06C755]/20 shadow-md z-10' 
+                            : 'border-transparent hover:border-slate-200 hover:bg-slate-50 hover:shadow-sm'
+                            }`}
+                    >
+                        {/* Controls */}
+                        {selectedId === el.id && (
+                            <div className="absolute -right-3 -top-3 flex gap-1 z-20">
+                                <button 
+                                    onClick={(e) => { e.stopPropagation(); onMoveUp(el.id); }} 
+                                    disabled={index === 0}
+                                    className="h-7 w-7 rounded-full bg-[#06C755] text-white flex items-center justify-center hover:bg-[#05a847] shadow-sm disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                                    title="Move Up"
+                                >
+                                    <i className="fa-solid fa-arrow-up text-xs"></i>
+                                </button>
+                                <button 
+                                    onClick={(e) => { e.stopPropagation(); onMoveDown(el.id); }} 
+                                    disabled={index === list.length - 1}
+                                    className="h-7 w-7 rounded-full bg-[#06C755] text-white flex items-center justify-center hover:bg-[#05a847] shadow-sm disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                                    title="Move Down"
+                                >
+                                    <i className="fa-solid fa-arrow-down text-xs"></i>
+                                </button>
+                            </div>
+                        )}
+
+                        {/* Label area (if not hidden types) */}
+                        {el.type !== 'button' && el.type !== 'header' && el.type !== 'paragraph' && el.type !== 'layout_2col' && el.type !== 'layout_3col' && el.type !== 'layout_row' && (
+                            <label className={labelClass}>
+                            {el.label} {el.required && <span className="text-red-500">*</span>}
+                            </label>
+                        )}
+
+                        {/* Render Element Content */}
+                        {renderElementContent(el)}
+                        
+                        {el.helpText && <p className="mt-1 text-xs text-slate-400 pointer-events-none">{el.helpText}</p>}
+                    </div>
+                ));
+            };
+
+            const handleDropMain = (e) => {
+                e.preventDefault();
+                onDrop(e);
+            };
+
+            return (
+                <div 
+                    className="flex-1 bg-slate-100 overflow-y-auto p-8 relative"
+                    onDrop={handleDropMain}
+                    onDragOver={onDragOver}
+                    onClick={() => onSelect(null)}
+                >
+                    <div className="mx-auto max-w-2xl min-h-[80vh] bg-white rounded-xl shadow-lg border border-slate-200 p-8 transition-all">
+                        
+                        {elements.length === 0 && (
+                        <div className="h-full flex flex-col items-center justify-center border-2 border-dashed border-slate-300 rounded-lg p-12 text-slate-400 mt-10 bg-slate-50 pointer-events-none">
+                            <i className="fa-solid fa-layer-group text-5xl mb-4 text-slate-300"></i>
+                            <p className="text-lg font-medium text-slate-600">Your form is empty</p>
+                            <p className="text-sm">Drag elements from the sidebar here.</p>
+                        </div>
+                        )}
+
+                        <div>
+                            {renderList(elements)}
+                        </div>
+
+                    </div>
+                    
+                    {/* Footer / Watermark */}
+                    <div className="text-center mt-8 text-slate-400 text-sm">
+                        FormFlow Builder
+                    </div>
+                </div>
+            );
+        };
+
+        // 3. PROPERTIES PANEL
+        const PropertiesPanel = ({ selectedElement, onUpdate, onDelete, onClose }) => {
+            if (!selectedElement) {
+                return (
+                <div className="w-80 bg-white border-l border-slate-200 h-full p-6 flex flex-col items-center justify-center text-center text-slate-400">
+                    <div className="w-16 h-16 bg-slate-50 rounded-full flex items-center justify-center mb-4">
+                        <i className="fa-solid fa-arrow-pointer text-2xl text-slate-300"></i>
+                    </div>
+                    <p className="text-sm">Select an element on the canvas to edit its properties.</p>
+                </div>
+                );
+            }
+
+            const handleChange = (field, value) => {
+                onUpdate(selectedElement.id, { [field]: value });
+            };
+
+            const handleOptionsChange = (text) => {
+                const options = text.split('\n').filter(o => o.trim() !== '');
+                handleChange('options', options);
+            };
+
+            const inputClass = "w-full p-2.5 text-sm font-mono border rounded-md border-slate-200 bg-slate-50 text-slate-600 focus:ring-2 focus:ring-indigo-100 outline-none transition-all";
+
+            return (
+                <div className="w-80 bg-white border-l border-slate-200 h-full flex flex-col shadow-xl z-20">
+                <div className="p-4 border-b border-slate-100 flex justify-between items-center bg-white">
+                    <h2 className="font-bold text-slate-800">Edit Properties</h2>
+                    <button onClick={onClose} className="text-slate-400 hover:text-slate-600 transition-colors">
+                    <i className="fa-solid fa-xmark"></i>
+                    </button>
+                </div>
+
+                <div className="flex-1 overflow-y-auto p-5 space-y-5 custom-scrollbar">
+                    
+                    {/* Type Badge */}
+                    <div className="flex items-center justify-between mb-2">
+                        <span className="text-xs font-mono bg-[#06C755]/10 text-[#06C755] px-2 py-1 rounded border border-[#06C755]/20 uppercase font-bold tracking-wide">
+                            {selectedElement.type.replace('_', ' ')}
+                        </span>
+                        <span className="text-xs text-slate-400 font-mono">ID: {selectedElement.id.slice(0, 4)}</span>
+                    </div>
+
+                    {/* Common Fields */}
+                    <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1.5 uppercase tracking-wide">Label</label>
+                    <input
+                        type="text"
+                        value={selectedElement.label}
+                        onChange={(e) => handleChange('label', e.target.value)}
+                        className={inputClass}
+                    />
+                    </div>
+
+                    {/* File Specific: Folder ID */}
+                    {selectedElement.type === 'file' && (
+                        <div className="bg-slate-50 p-3 rounded-lg border border-slate-100">
+                            <label className="block text-xs font-bold text-slate-700 mb-1.5 uppercase tracking-wide flex items-center gap-1">
+                                <i className="fa-brands fa-google-drive"></i> Drive Folder ID
+                            </label>
+                            <input
+                                type="text"
+                                value={selectedElement.folderId || ''}
+                                onChange={(e) => handleChange('folderId', e.target.value)}
+                                placeholder="e.g. 1A2b3C..."
+                                className={inputClass}
+                            />
+                            <p className="text-[10px] text-slate-500 mt-1 leading-tight">
+                                Files will be saved to this specific folder. Leave empty to save to root.
+                            </p>
+                        </div>
+                    )}
+
+                    {['text', 'email', 'number', 'password', 'textarea', 'header', 'paragraph', 'button'].includes(selectedElement.type) && (
+                    <div>
+                        <label className="block text-xs font-bold text-slate-700 mb-1.5 uppercase tracking-wide">
+                            {selectedElement.type === 'button' ? 'Button Text' : 'Placeholder'}
+                        </label>
+                        <input
+                        type="text"
+                        value={selectedElement.placeholder || ''}
+                        onChange={(e) => handleChange('placeholder', e.target.value)}
+                        className={inputClass}
+                        />
+                    </div>
+                    )}
+
+                    {['text', 'email', 'number', 'password', 'textarea', 'select', 'date', 'file', 'checkbox', 'multi_checkbox', 'radio'].includes(selectedElement.type) && (
+                    <div>
+                        <label className="block text-xs font-bold text-slate-700 mb-1.5 uppercase tracking-wide">Field Name (attribute)</label>
+                        <input
+                        type="text"
+                        value={selectedElement.name || ''}
+                        onChange={(e) => handleChange('name', e.target.value)}
+                        className={inputClass}
+                        placeholder={selectedElement.label.toLowerCase().replace(/[^a-zA-Z0-9]/g, '_')}
+                        />
+                    </div>
+                    )}
+
+                    {/* Options */}
+                    {['select', 'radio', 'checkbox', 'multi_checkbox'].includes(selectedElement.type) && (
+                    <div>
+                        <label className="block text-xs font-bold text-slate-700 mb-1.5 uppercase tracking-wide">Options (one per line)</label>
+                        <textarea
+                        rows={4}
+                        value={selectedElement.options?.join('\n') || ''}
+                        onChange={(e) => handleOptionsChange(e.target.value)}
+                        className={inputClass}
+                        ></textarea>
+                    </div>
+                    )}
+
+                    {/* Help Text */}
+                    {!['header', 'button', 'layout_2col', 'layout_3col'].includes(selectedElement.type) && (
+                        <div>
+                        <label className="block text-xs font-bold text-slate-700 mb-1.5 uppercase tracking-wide">Help Text</label>
+                        <input
+                            type="text"
+                            value={selectedElement.helpText || ''}
+                            onChange={(e) => handleChange('helpText', e.target.value)}
+                            className={inputClass}
+                        />
+                        </div>
+                    )}
+
+                    {/* Validation */}
+                    {['text', 'email', 'password', 'number', 'select', 'date', 'checkbox', 'multi_checkbox', 'radio', 'file'].includes(selectedElement.type) && (
+                    <div className="flex items-center p-3 bg-slate-50 rounded-lg border border-slate-100">
+                        <input
+                        id="req-check"
+                        type="checkbox"
+                        checked={selectedElement.required || false}
+                        onChange={(e) => handleChange('required', e.target.checked)}
+                        className="h-4 w-4 rounded border-slate-300 text-[#06C755] focus:ring-[#06C755]"
+                        />
+                        <label htmlFor="req-check" className="ml-2 text-sm text-slate-700 font-medium cursor-pointer">Required Field</label>
+                    </div>
+                    )}
+
+                </div>
+
+                <div className="p-4 border-t border-slate-200 bg-slate-50">
+                    <button
+                    onClick={() => onDelete(selectedElement.id)}
+                    className="w-full rounded-lg bg-white py-2.5 px-4 text-sm font-medium text-red-500 hover:bg-red-50 hover:text-red-600 border border-red-100 transition-all shadow-sm hover:shadow flex items-center justify-center gap-2"
+                    >
+                    <i className="fa-solid fa-trash-can"></i> Delete Element
+                    </button>
+                </div>
+                </div>
+            );
+        };
+
+        // --- MAIN APP ---
+
+        const App = () => {
+            const [elements, setElements] = useState([
+                { id: '1', type: 'header', label: 'Header', placeholder: 'Job Application Form' },
+                { id: '2', type: 'paragraph', label: 'Desc', placeholder: 'Please fill out the details below.' }
+            ]);
+            const [selectedId, setSelectedId] = useState(null);
+            const [showCode, setShowCode] = useState(false);
+            const [generatedCode, setGeneratedCode] = useState('');
+            const [exportTab, setExportTab] = useState('html');
+
+            // Helpers
+            const addRecursive = (list, parentId, colIndex, newEl) => {
+                if (!parentId) return [...list, newEl];
+                return list.map(el => {
+                    if (el.id === parentId && el.columns) {
+                        const newCols = [...el.columns];
+                        if (newCols[colIndex]) newCols[colIndex] = [...newCols[colIndex], newEl];
+                        return { ...el, columns: newCols };
+                    }
+                    if (el.columns) return { ...el, columns: el.columns.map(col => addRecursive(col, parentId, colIndex, newEl)) };
+                    return el;
+                });
+            };
+
+            const updateRecursive = (list, id, updates) => {
+                return list.map(el => {
+                    if (el.id === id) return { ...el, ...updates };
+                    if (el.columns) return { ...el, columns: el.columns.map(col => updateRecursive(col, id, updates)) };
+                    return el;
+                });
+            };
+
+            const deleteRecursive = (list, id) => {
+                const filtered = list.filter(el => el.id !== id);
+                if (filtered.length !== list.length) return filtered;
+                return list.map(el => {
+                    if (el.columns) return { ...el, columns: el.columns.map(col => deleteRecursive(col, id)) };
+                    return el;
+                });
+            };
+
+            const findRecursive = (list, id) => {
+                for (const el of list) {
+                    if (el.id === id) return el;
+                    if (el.columns) {
+                        for (const col of el.columns) {
+                            const found = findRecursive(col, id);
+                            if (found) return found;
+                        }
+                    }
+                }
+                return null;
+            };
+
+            const moveRecursive = (list, id, direction) => {
+                const index = list.findIndex(el => el.id === id);
+                if (index !== -1) {
+                    const newIdx = direction === 'up' ? index - 1 : index + 1;
+                    if (newIdx >= 0 && newIdx < list.length) {
+                        const newList = [...list];
+                        [newList[index], newList[newIdx]] = [newList[newIdx], newList[index]];
+                        return newList;
+                    }
+                    return list;
+                }
+                return list.map(el => {
+                    if (el.columns) return { ...el, columns: el.columns.map(col => moveRecursive(col, id, direction)) };
+                    return el;
+                });
+            };
+
+            // Handlers
+            const handleDragStart = (e, type) => {
+                e.dataTransfer.setData('elementType', type);
+            };
+
+            const handleDrop = (e, parentId, colIndex) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const type = e.dataTransfer.getData('elementType');
+                if (!type) return;
+
+                const defaultProps = DEFAULT_PROPS[type];
+                const newEl = {
+                    id: crypto.randomUUID(),
+                    type,
+                    ...defaultProps,
+                    columns: defaultProps.columns ? defaultProps.columns.map(c => []) : undefined
+                };
+
+                setElements(prev => addRecursive(prev, parentId, colIndex || 0, newEl));
+                setSelectedId(newEl.id);
+            };
+
+            const handleGenerateCode = () => {
+                setGeneratedCode(generateHTML(elements));
+                setShowCode(true);
+            };
+
+            const selectedElement = findRecursive(elements, selectedId || '');
+
+            return (
+                <div className="flex h-screen bg-slate-100 overflow-hidden font-sans text-slate-700">
+                    <Sidebar onDragStart={handleDragStart} />
+                    
+                    <div className="flex-1 flex flex-col relative h-full">
+                        <header className="bg-white border-b border-slate-200 px-6 py-3 flex justify-between items-center shadow-sm z-10">
+                            <div className="flex items-center gap-4">
+                                <button onClick={() => setElements([])} className="text-xs font-semibold text-red-500 hover:text-red-700 hover:bg-red-50 px-3 py-1.5 rounded transition-colors">
+                                    <i className="fa-solid fa-trash mr-1"></i> Clear Canvas
+                                </button>
+                            </div>
+                            <div className="flex gap-3">
+                                <button onClick={handleGenerateCode} className="bg-slate-800 hover:bg-slate-700 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-md transition-all flex items-center gap-2">
+                                    <i className="fa-solid fa-code"></i> Export Code
+                                </button>
+                            </div>
+                        </header>
+
+                        <Canvas 
+                            elements={elements} 
+                            selectedId={selectedId} 
+                            onSelect={setSelectedId} 
+                            onDrop={handleDrop}
+                            onDragOver={(e) => e.preventDefault()}
+                            onMoveUp={(id) => setElements(prev => moveRecursive(prev, id, 'up'))}
+                            onMoveDown={(id) => setElements(prev => moveRecursive(prev, id, 'down'))}
+                        />
+                    </div>
+
+                    <PropertiesPanel 
+                        selectedElement={selectedElement}
+                        onUpdate={(id, updates) => setElements(prev => updateRecursive(prev, id, updates))}
+                        onDelete={(id) => { setElements(prev => deleteRecursive(prev, id)); setSelectedId(null); }}
+                        onClose={() => setSelectedId(null)}
+                    />
+
+                    {/* Export Modal */}
+                    {showCode && (
+                        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                            <div className="bg-white rounded-xl w-full max-w-4xl shadow-2xl flex flex-col h-[90vh] overflow-hidden">
+                                <div className="flex justify-between items-center p-5 border-b border-slate-100 bg-white">
+                                    <div className="flex items-center gap-4">
+                                        <h3 className="font-bold text-lg text-slate-800">Export</h3>
+                                        <div className="flex bg-slate-100 rounded-lg p-1 gap-1">
+                                            <button onClick={() => setExportTab('html')} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all ${exportTab === 'html' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>index.html</button>
+                                            <button onClick={() => setExportTab('gs')} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all ${exportTab === 'gs' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>code.gs</button>
+                                        </div>
+                                    </div>
+                                    <button onClick={() => setShowCode(false)} className="text-slate-400 hover:text-slate-600"><i className="fa-solid fa-xmark text-xl"></i></button>
+                                </div>
+                                <div className="flex-1 overflow-hidden p-0 bg-[#1e1e1e] relative group">
+                                    <textarea readOnly className="w-full h-full p-6 bg-[#1e1e1e] text-blue-200 font-mono text-sm resize-none focus:outline-none custom-scrollbar" value={exportTab === 'html' ? generatedCode : GS_CODE_TEMPLATE}></textarea>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
